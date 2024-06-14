@@ -1,0 +1,25 @@
+{
+  "name": "@thesmart/dragondrop",
+  "version": "0.1.0",
+  "exports": "./mod.ts",
+  "imports": {
+    "@npm/aws-sdk/client-s3": "npm:@aws-sdk/client-s3@^3.596.0",
+    "@npm/nanoid": "npm:nanoid@^5.0.7",
+    "@std/assert": "jsr:@std/assert@^0.226.0",
+    "@std/cli": "jsr:@std/cli@^0.224.6",
+    "@std/io": "jsr:@std/io@^0.224.1",
+    "@std/testing": "jsr:@std/testing@^0.225.1",
+    "@x/hono": "jsr:@hono/hono@^4.4.2",
+    "@x/zod": "https://deno.land/x/zod@v3.23.8/mod.ts"
+  },
+  "tasks": {
+    "watch": "deno test --fail-fast --watch",
+    "test": "deno test --parallel",
+    "coverage": "deno test --coverage=.profile && deno coverage .profile --html"
+  },
+  "fmt": {
+    "lineWidth": 80,
+    "singleQuote": true,
+    "exclude": ["README.md", "LICENSE"]
+  }
+}

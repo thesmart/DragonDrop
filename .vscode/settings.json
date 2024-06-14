@@ -1,0 +1,10 @@
+{
+  "deno.enablePaths": [
+    "./"
+  ],
+  "deno.enable": true,
+  "deno.cacheOnSave": true,
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "denoland.vscode-deno",
+  "editor.rulers": [80]
+}
