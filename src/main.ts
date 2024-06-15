@@ -1,10 +1,10 @@
 import { parseArgs } from '@std/cli';
 import { S3Client } from '@npm/aws-sdk/client-s3';
-import { S3_REGION } from './config.ts';
-import { uploadFile } from './upload.ts';
+import { S3Uploader } from './upload.ts';
+import { assert } from '@std/assert';
 
 function die(
-  msg: string = 'Usage: deno task script [FLAGS] [COMMAND]',
+  msg: string = 'Usage: deno run --allow-all main.ts [FLAGS] [FILE_PATH]',
   exitCode: number = 1,
 ) {
   console.error(msg);
@@ -12,26 +12,27 @@ function die(
 }
 
 const args = parseArgs(Deno.args);
+const s3Region: string = (args.region || Deno.env.get('S3_REGION'))!;
+assert(
+  s3Region.length,
+  'Either set S3_REGION in the environment or pass --region',
+);
+const s3Bucket: string = (args.bucket || Deno.env.get('S3_BUCKET'))!;
+assert(
+  s3Bucket.length,
+  'Either set S3_BUCKET in the environment or pass --bucket',
+);
 
-const s3Client = new S3Client({ region: S3_REGION });
-
-const commands = {
-  upload: async () => {
-    const filePath = args._[1] as string;
-    if (typeof filePath !== 'string') {
-      die('Usage: deno task script [FLAGS] upload [FILE_PATH]');
-    }
-    console.info(`Writing file (${filePath}) to S3 ... `);
-    const { url } = await uploadFile(s3Client, filePath);
-    console.info(
-      'Success: ',
-      `${url}`,
-    );
-  },
-};
-
-if (typeof args._[0] !== 'string') {
+const s3Client = new S3Client({ region: s3Region });
+const filePath = args._[0] as string;
+if (typeof filePath !== 'string') {
   die();
 }
-const command = args._[0] as keyof typeof commands;
-commands[command] ? await commands[command]() : die();
+
+const uploader = new S3Uploader(s3Client, s3Region, s3Bucket, filePath);
+await uploader.uploadFile();
+
+console.info(
+  'Success: ',
+  `${uploader.url}`,
+);

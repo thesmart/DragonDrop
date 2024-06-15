@@ -2,6 +2,7 @@
   "version": "3",
   "packages": {
     "specifiers": {
+      "jsr:@hono/hono@^4.4.2": "jsr:@hono/hono@4.4.5",
       "jsr:@std/assert@^0.226.0": "jsr:@std/assert@0.226.0",
       "jsr:@std/cli@^0.224.6": "jsr:@std/cli@0.224.6",
       "jsr:@std/internal@^1.0.0": "jsr:@std/internal@1.0.0",
@@ -10,6 +11,9 @@
       "npm:nanoid@^5.0.7": "npm:nanoid@5.0.7"
     },
     "jsr": {
+      "@hono/hono@4.4.5": {
+        "integrity": "8b0f005253251e7e3dcd5c1d54cd236b24db9634e5483815fad67aca2fb2eaf2"
+      },
       "@std/assert@0.226.0": {
         "integrity": "0dfb5f7c7723c18cec118e080fec76ce15b4c31154b15ad2bd74822603ef75b3",
         "dependencies": [

@@ -1,3 +1,4 @@
+import { assert } from '@std/assert';
 import {
   CompletedPart,
   CompleteMultipartUploadCommand,
@@ -5,9 +6,8 @@ import {
   PutObjectCommand,
   UploadPartCommand,
 } from '@npm/aws-sdk/client-s3';
-import { S3Client } from '@npm/aws-sdk/client-s3';
-import { assert } from '@std/assert';
-import { nanoid, S3_BUCKET, S3_REGION } from './config.ts';
+import type { S3Client } from '@npm/aws-sdk/client-s3';
+import { customAlphabet } from '@npm/nanoid';
 import contentTypes from './mimes.json' with { type: 'json' };
 import { PromiseQueue } from './promise-queue.ts';
 
@@ -45,9 +45,13 @@ function genKeyAndContentType(
   return { s3ObjectKey, extension, contentType };
 }
 
-function s3Url(region: string, bucket: string, objectKey: string) {
-  return `https://${bucket}.s3.${region}.amazonaws.com/${objectKey}`;
-}
+/**
+ * Generate unique ids.
+ */
+const nanoid = customAlphabet(
+  '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
+  10,
+);
 
 interface UploadResult {
   s3ObjectKey: string;
@@ -57,188 +61,185 @@ interface UploadResult {
   url: string;
 }
 
-/**
- * Upload a file to S3.
- * If the file is above 5MB, it will be sent concurrently in chunks.
- */
-export async function uploadFile(
-  client: S3Client,
-  filePath: string,
-  concurrency: number = 8,
-  chunkByteSize: number = 1024 * 10_000, // 10 MB
-): Promise<UploadResult> {
-  // check the file exists
-  const file = await Deno.open(filePath, { read: true });
-  const fileStat = await file.stat();
-  if (!fileStat.isFile) {
-    throw new Error(`No file exists at path (${filePath})`);
-  } else if (!fileStat.size) {
-    throw new Error(`Unable to upload a zero byte file (${filePath})`);
-  }
-
-  // generate remote file metadata
-  const { s3ObjectKey, contentType } = genKeyAndContentType(filePath);
-
-  if (fileStat.size > 1024 * 5_000) {
-    return await multiPartUpload(
-      client,
-      file,
-      fileStat,
-      s3ObjectKey,
-      contentType,
-      concurrency,
-      chunkByteSize,
-    );
-  }
-
-  // read file into memory
-  const buffer = new Uint8Array(fileStat.size);
-  await file.read(buffer);
-
-  const cmd = new PutObjectCommand({
-    Bucket: S3_BUCKET,
-    Key: s3ObjectKey,
-    CacheControl: 'max-age=315360000, immutable',
-    ContentType: contentType,
-    Body: buffer,
-  });
-  const results = await client.send(cmd);
-  results;
-  return {
-    s3Region: S3_REGION,
-    s3Bucket: S3_BUCKET,
-    s3ObjectKey: s3ObjectKey,
-    eTag: results.ETag!,
-    url: s3Url(S3_REGION, S3_BUCKET, s3ObjectKey),
-  };
-}
-
 interface UploadPartResult {
-  s3ObjectKey: string;
   s3UploadId: string;
   partNumber: number;
   eTag: string;
 }
 
 /**
- * A function that returns a function that uploads a part of a file.
+ * Manages uploads to S3.
  */
-function createUploadPartFn(
-  client: S3Client,
-  file: Deno.FsFile,
-  s3ObjectKey: string,
-  s3UploadId: string,
-  partNumber: number,
-  partByteSize: number,
-  totalPartCount: number,
-) {
-  return async (): Promise<UploadPartResult> => {
-    console.info(
-      `\tUploading part ${partNumber} of ${totalPartCount} (${partByteSize} bytes)...`,
-    );
-    // allocate a buffer
-    const buffer = new Uint8Array(partByteSize);
-    // read a file chunk into the buffer
-    const bytesRead = await file.read(buffer);
-    assert(
-      bytesRead,
-      'Expected to be able to read more bytes, stat size differs from read size.',
-    );
+export class S3Uploader {
+  s3Region: string;
+  s3Bucket: string;
+  s3Client: S3Client;
+  s3ObjectKey: string;
+  filePath: string;
+  fileExtension: string;
+  fileContentType: string;
+  fsFile: Deno.FsFile;
+  fsFileInfo: Deno.FileInfo;
+  concurrency: number = 8; // concurrent uploads
+  chunkByteSize: number = 1024 * 10_000; // 10 MB
 
-    // upload the chunk to S3
-    const cmd = new UploadPartCommand({
-      Bucket: S3_BUCKET,
-      Key: s3ObjectKey,
-      PartNumber: partNumber,
-      UploadId: s3UploadId,
-      Body: buffer,
-    });
-
-    const uploadPartPromise = client.send(cmd).then((result) => {
-      console.info(
-        `\tSuccessfully uploaded part ${partNumber} of ${totalPartCount} (${bytesRead} bytes).`,
-      );
-      return {
-        s3ObjectKey,
-        s3UploadId,
-        partNumber,
-        eTag: result.ETag!,
-      } as UploadPartResult;
-    });
-    return uploadPartPromise;
-  };
-}
-
-/**
- * Upload a file into S3 using the file system.
- */
-export async function multiPartUpload(
-  client: S3Client,
-  file: Deno.FsFile,
-  fileStat: Deno.FileInfo,
-  s3ObjectKey: string,
-  contentType: string,
-  concurrency: number,
-  chunkByteSize: number = 1024 * 10_000, // 10 MB
-): Promise<UploadResult> {
-  // startup a multipart upload
-  const createCommand = new CreateMultipartUploadCommand({
-    Bucket: S3_BUCKET,
-    Key: s3ObjectKey,
-    CacheControl: 'max-age=315360000, immutable',
-    ContentType: contentType,
-  });
-  const { UploadId: s3UploadId } = await client.send(createCommand);
-
-  // setup concurrent uploads
-  const queue = new PromiseQueue<UploadPartResult>(concurrency);
-  const totalPartCount = Math.ceil(fileStat.size / chunkByteSize);
-  let remainingBytes = fileStat.size;
-  let currPartNumber = 0;
-
-  while (remainingBytes > 0) {
-    ++currPartNumber;
-    const currPartSize = remainingBytes >= chunkByteSize
-      ? chunkByteSize
-      : remainingBytes;
-    remainingBytes -= currPartSize;
-    queue.add(createUploadPartFn(
-      client,
-      file,
-      s3ObjectKey,
-      s3UploadId!,
-      currPartNumber,
-      currPartSize,
-      totalPartCount,
-    ));
+  constructor(
+    client: S3Client,
+    region: string,
+    bucket: string,
+    filePath: string,
+  ) {
+    this.s3Region = region;
+    this.s3Bucket = bucket;
+    this.s3Client = client;
+    // generate remote file metadata
+    const fileMeta = genKeyAndContentType(filePath);
+    this.s3ObjectKey = fileMeta.s3ObjectKey;
+    this.filePath = filePath;
+    this.fileExtension = fileMeta.extension;
+    this.fileContentType = fileMeta.contentType;
+    this.fsFile = Deno.openSync(this.filePath, { read: true });
+    // check the file exists
+    this.fsFileInfo = this.fsFile.statSync();
+    if (!this.fsFileInfo.isFile) {
+      throw new Error(`No file exists at path (${filePath}).`);
+    } else if (!this.fsFileInfo.size) {
+      throw new Error(`Unable to upload a zero byte file (${filePath}).`);
+    }
   }
 
-  console.info(
-    `Starting upload of ${fileStat.size} bytes over ${totalPartCount} parts ...`,
-  );
-  const results = await queue.execute();
-  const multipartUploadManifest: CompletedPart[] = results.map((r) => ({
-    PartNumber: r.partNumber,
-    ETag: r.eTag,
-  }));
+  get url() {
+    return `https://${this.s3Bucket}.s3.${this.s3Region}.amazonaws.com/${this.s3ObjectKey}`;
+  }
 
-  // complete the upload
-  console.info('All parts uploaded, now completing the upload ...');
-  const completeCommand = new CompleteMultipartUploadCommand({
-    Bucket: S3_BUCKET,
-    Key: s3ObjectKey,
-    UploadId: s3UploadId,
-    MultipartUpload: {
-      Parts: multipartUploadManifest,
-    },
-  });
+  async uploadFile(): Promise<UploadResult> {
+    // 5MB is the minimum for multipart uploads
+    if (this.fsFileInfo.size >= 1024 * 5_000) {
+      return await this.multiPartUpload();
+    }
 
-  const result = await client.send(completeCommand);
-  return {
-    s3ObjectKey: result.Key!,
-    eTag: result.ETag!,
-    s3Bucket: result.Bucket!,
-    s3Region: S3_REGION,
-    url: result.Location!,
-  };
+    // read file into memory
+    const buffer = new Uint8Array(this.fsFileInfo.size);
+    await this.fsFile.read(buffer);
+
+    const cmd = new PutObjectCommand({
+      Bucket: this.s3Bucket,
+      Key: this.s3ObjectKey,
+      CacheControl: 'max-age=315360000, immutable',
+      ContentType: this.fileContentType,
+      Body: buffer,
+    });
+    const results = await this.s3Client.send(cmd);
+    results;
+    return {
+      s3Region: this.s3Region,
+      s3Bucket: this.s3Bucket,
+      s3ObjectKey: this.s3ObjectKey,
+      eTag: results.ETag!,
+      url: this.url,
+    };
+  }
+
+  private async multiPartUpload(): Promise<UploadResult> {
+    // startup a multipart upload
+    console.info(
+      `Starting multipart upload of ${this.fsFileInfo.size} bytes ...`,
+    );
+    const createCommand = new CreateMultipartUploadCommand({
+      Bucket: this.s3Bucket,
+      Key: this.s3ObjectKey,
+      CacheControl: 'max-age=315360000, immutable',
+      ContentType: this.fileContentType,
+    });
+    const { UploadId: s3UploadId } = await this.s3Client.send(createCommand);
+
+    // setup concurrent uploads
+    const queue = new PromiseQueue<UploadPartResult>(this.concurrency);
+    const totalPartCount = Math.ceil(this.fsFileInfo.size / this.chunkByteSize);
+    let remainingBytes = this.fsFileInfo.size;
+    let currPartNumber = 0;
+
+    while (remainingBytes > 0) {
+      ++currPartNumber;
+      const currPartByteSize = remainingBytes >= this.chunkByteSize
+        ? this.chunkByteSize
+        : remainingBytes;
+      remainingBytes -= currPartByteSize;
+      queue.add(this.createPartUploadFn(
+        s3UploadId!,
+        currPartNumber,
+        currPartByteSize,
+        totalPartCount,
+      ));
+    }
+
+    // wait for all parts to upload
+    const results = await queue.execute();
+    const multipartUploadManifest: CompletedPart[] = results.map((r) => ({
+      PartNumber: r.partNumber,
+      ETag: r.eTag,
+    }));
+
+    // complete the upload
+    console.info('All parts uploaded, now completing the upload ...');
+    const completeCommand = new CompleteMultipartUploadCommand({
+      Bucket: this.s3Bucket,
+      Key: this.s3ObjectKey,
+      UploadId: s3UploadId,
+      MultipartUpload: {
+        Parts: multipartUploadManifest,
+      },
+    });
+
+    const result = await this.s3Client.send(completeCommand);
+    return {
+      s3Region: this.s3Region,
+      s3Bucket: this.s3Bucket,
+      s3ObjectKey: this.s3ObjectKey,
+      eTag: result.ETag!,
+      url: this.url,
+    };
+  }
+
+  private createPartUploadFn(
+    s3UploadId: string,
+    partNumber: number,
+    partByteSize: number,
+    totalPartCount: number,
+  ): () => Promise<UploadPartResult> {
+    return async (): Promise<UploadPartResult> => {
+      console.info(
+        `\tUploading part ${partNumber} of ${totalPartCount} (${partByteSize} bytes)...`,
+      );
+      // allocate a buffer
+      const buffer = new Uint8Array(partByteSize);
+      // read a file chunk into the buffer
+      const bytesRead = await this.fsFile.read(buffer);
+      assert(
+        bytesRead,
+        'Expected to read more bytes, stat size differs from read size.',
+      );
+
+      // upload the chunk to S3
+      const cmd = new UploadPartCommand({
+        Bucket: this.s3Bucket,
+        Key: this.s3ObjectKey,
+        PartNumber: partNumber,
+        UploadId: s3UploadId,
+        Body: buffer,
+      });
+
+      const uploadPartPromise = this.s3Client.send(cmd).then((result) => {
+        console.info(
+          `\tSuccessfully uploaded part ${partNumber} of ${totalPartCount} (${bytesRead} bytes).`,
+        );
+        return {
+          s3UploadId,
+          partNumber,
+          eTag: result.ETag!,
+        } as UploadPartResult;
+      });
+      return uploadPartPromise;
+    };
+  }
 }
