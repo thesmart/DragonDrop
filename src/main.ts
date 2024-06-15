@@ -1,7 +1,7 @@
 import { parseArgs } from '@std/cli';
 import { S3Client } from '@npm/aws-sdk/client-s3';
 import { S3_REGION } from './config.ts';
-import { uploadFile } from './s3.ts';
+import { uploadFile } from './upload.ts';
 
 function die(
   msg: string = 'Usage: deno task script [FLAGS] [COMMAND]',
@@ -21,7 +21,12 @@ const commands = {
     if (typeof filePath !== 'string') {
       die('Usage: deno task script [FLAGS] upload [FILE_PATH]');
     }
-    await uploadFile(s3Client, filePath);
+    console.info(`Writing file (${filePath}) to S3 ... `);
+    const { url } = await uploadFile(s3Client, filePath);
+    console.info(
+      'Success: ',
+      `${url}`,
+    );
   },
 };
 
